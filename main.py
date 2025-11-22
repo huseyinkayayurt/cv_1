@@ -24,7 +24,7 @@ def parse_args():
     parser.add_argument(
         "--pause-distance",
         type=float,
-        default=60.0,
+        default=80.0,
         help="Aynı objeyi tanımak için merkezler arası maksimum mesafe (px, varsayılan: 60)"
     )
     return parser.parse_args()
