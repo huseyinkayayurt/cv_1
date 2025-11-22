@@ -72,16 +72,36 @@ class CSignDetector:
     # -----------------------------
     # Aynı obje kontrolü
     # -----------------------------
-    def _is_new_object(self, direction: str, center: tuple) -> bool:
-        cx, cy = center
-        for (d, (ox, oy)) in self.detected_objects:
+    def _is_new_object(self, direction: str, box):
+        """
+        box = (x1, y1, x2, y2)
+
+        Daha önce tespit edilmiş objelerin bounding box'larıyla
+        karşılaştırıp bu objenin "yeni" olup olmadığını döner.
+        Aynı yönde ve konum olarak yakınsa aynı obje kabul edilir.
+        """
+        x1, y1, x2, y2 = box
+
+        # Etrafı genişletilmiş takip bölgesi
+        PAD = 120  # robotun hareketini tolere etmek için geniş tutuldu
+        ex1 = x1 - PAD
+        ey1 = y1 - PAD
+        ex2 = x2 + PAD
+        ey2 = y2 + PAD
+
+        for (d, (ox1, oy1, ox2, oy2)) in self.detected_objects:
             if d != direction:
-                continue
-            dist = math.dist((cx, cy), (ox, oy))
-            if dist <= self.same_object_max_distance:
-                # Aynı yönde ve konuma yakın → aynı obje
+                continue  # yön farklıysa aynı obje sayma
+
+            # Önceki objenin merkezini al
+            ocx = (ox1 + ox2) / 2.0
+            ocy = (oy1 + oy2) / 2.0
+
+            # Bu merkez genişletilmiş kutunun içindeyse aynı obje
+            if ex1 <= ocx <= ex2 and ey1 <= ocy <= ey2:
                 return False
-        return True
+
+        return True  # hiçbirine uymadıysa yeni obje
 
     # -----------------------------
     # Frame işle
@@ -145,6 +165,7 @@ class CSignDetector:
                 tl = detection["top_left"]
                 br = detection["bottom_right"]
                 center = detection["center"]
+                bbox = (tl[0], tl[1], br[0], br[1])
 
                 # Dikdörtgen çiz + yönü yaz
                 cv2.rectangle(frame, tl, br, (0, 255, 0), 2)
@@ -159,10 +180,10 @@ class CSignDetector:
                 )
 
                 # Yeni obje mi?
-                if self._is_new_object(direction, center):
-                    self.detected_objects.append((direction, center))
+                if self._is_new_object(direction, bbox):
+                    # Artık center değil bbox kaydediyoruz
+                    self.detected_objects.append((direction, bbox))
 
-                    # Tüm tespitleri komut satırına yaz
                     print(
                         f"[DETECTION] Frame={frame_index:5d} | "
                         f"Yön={direction:6s} | "
@@ -170,7 +191,6 @@ class CSignDetector:
                         f"Merkez=({center[0]:.1f}, {center[1]:.1f})"
                     )
 
-                    # Video durdur, space'e basılınca devam et
                     cv2.imshow("Video", frame)
                     print(">> Tespit edildi. Devam etmek için SPACE (boşluk) tuşuna basın.")
                     while True:
@@ -194,5 +214,7 @@ class CSignDetector:
         cv2.destroyAllWindows()
 
         print("\n[SUMMARY] Tespit edilen objeler:")
-        for i, (direction, (cx, cy)) in enumerate(self.detected_objects, start=1):
+        for i, (direction, (x1, y1, x2, y2)) in enumerate(self.detected_objects, start=1):
+            cx = (x1 + x2) / 2.0
+            cy = (y1 + y2) / 2.0
             print(f"  {i:2d}. Yön={direction:6s}, Merkez=({cx:.1f}, {cy:.1f})")

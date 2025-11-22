@@ -41,6 +41,7 @@ venv.bak/
 # Project specific - özel dosyalar
 data/
 frames/
+frames_backup/
 test_*.py
 
 # Jupyter Notebook
