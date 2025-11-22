@@ -1,13 +1,16 @@
 import cv2
 import numpy as np
 from pathlib import Path
+import time
 
 
 class CSignDetector:
     """
     C işaretini (Sağ / Sol / Yukarı / Aşağı) template matching ile tespit eder,
     videoyu oynatır ve her fiziksel obje için sadece ilk tespitte duraklatır.
-    Ek olarak frameleri ve yüzdeyi ekrana yazar.
+    - Açılı C'ler için: her template'in döndürülmüş versiyonlarını kullanır.
+    - Hız için: frame'leri downscale ederek çalışır.
+    - Overlay: frame numarası, yüzde ve geçen süreyi ekrana yazar.
     """
 
     # Klasör adı -> Türkçe yön ismi
@@ -22,23 +25,27 @@ class CSignDetector:
         self,
         templates_root: str,
         match_threshold: float = 0.6,
-        same_object_max_distance: float = 60.0,  # artık kullanılmıyor ama param bozulmasın diye duruyor
+        same_object_max_distance: float = 60.0,  # artık kullanılmıyor ama argüman bozulmasın diye bırakıldı
         pause_key: str = " ",
-        track_max_frame_gap: int = 120,  # aynı C için uzun süre tolerans (frame cinsinden)
+        track_max_frame_gap: int = 120,
     ):
         self.templates_root = Path(templates_root)
         self.match_threshold = match_threshold
         self.pause_key_code = ord(pause_key) if len(pause_key) == 1 else 32
         self.track_max_frame_gap = track_max_frame_gap
 
-        # { "Sağ": [ (template_img, (w, h)), ... ], ... }
+        # Hız için ölçekleme: 0.5 = hem yatay hem dikey boyutu yarıya indir (4x daha az iş)
+        self.scale_factor = 0.5
+
+        # Template'ler: { "Sağ": [ (tmpl_img_scaled, (w_scaled, h_scaled)), ... ], ... }
         self.templates = self._load_templates()
 
         # Bitmiş track'ler (rapor için)
         self.finished_tracks = []
 
         # Şu an sahnede takip edilen tek obje
-        # None veya dict:
+        self.active_track = None
+        # active_track:
         # {
         #   'direction': str,
         #   'first_frame': int,
@@ -47,16 +54,46 @@ class CSignDetector:
         #   'last_bbox': ((x1, y1), (x2, y2)),
         #   'first_score': float
         # }
-        self.active_track = None
-
-        # HSV altyapısı (şu an detection'ı boğmayacak şekilde çok geniş aralık)
-        # İstersen bunları daraltarak gerçek renk filtresine çevirebilirsin.
-        self.hsv_lower = np.array([0, 0, 0], dtype=np.uint8)
-        self.hsv_upper = np.array([180, 255, 255], dtype=np.uint8)
 
     # -----------------------------
-    # Template yükleme
+    # Template yükleme + rotasyon + scale
     # -----------------------------
+    def _generate_rotated_and_scaled(self, img_gray):
+        """
+        Verilen gri template için birkaç açı (0, ±15 derece) üreterek
+        her birini scale_factor ile yeniden boyutlandırır.
+        """
+        angles = [0, -15, 15]  # Gerekirse listeye -25, 25 de eklenebilir.
+        h, w = img_gray.shape
+        center = (w // 2, h // 2)
+
+        out = []
+
+        for angle in angles:
+            if angle == 0:
+                rotated = img_gray
+            else:
+                M = cv2.getRotationMatrix2D(center, angle, 1.0)
+                rotated = cv2.warpAffine(
+                    img_gray,
+                    M,
+                    (w, h),
+                    flags=cv2.INTER_LINEAR,
+                    borderMode=cv2.BORDER_REPLICATE,  # köşe artefaktlarını azalt
+                )
+
+            if self.scale_factor != 1.0:
+                new_w = max(1, int(w * self.scale_factor))
+                new_h = max(1, int(h * self.scale_factor))
+                rotated_scaled = cv2.resize(
+                    rotated, (new_w, new_h), interpolation=cv2.INTER_AREA
+                )
+                out.append((rotated_scaled, (new_w, new_h)))
+            else:
+                out.append((rotated, (w, h)))
+
+        return out
+
     def _load_templates(self):
         if not self.templates_root.exists():
             raise FileNotFoundError(f"Template klasörü bulunamadı: {self.templates_root}")
@@ -74,19 +111,22 @@ class CSignDetector:
                     print(f"[WARN] Template yüklenemedi: {img_path}")
                     continue
 
-                w, h = img.shape[::-1]
-                templates[direction_label].append((img, (w, h)))
-                print(f"[INFO] Template yüklendi: {img_path}  -> yön: {direction_label}")
+                rotated_scaled_list = self._generate_rotated_and_scaled(img)
+                templates[direction_label].extend(rotated_scaled_list)
+                print(
+                    f"[INFO] Template yüklendi: {img_path}  -> yön: {direction_label} "
+                    f"(rotated x{len(rotated_scaled_list)})"
+                )
 
         total_templates = sum(len(v) for v in templates.values())
         if total_templates == 0:
             raise RuntimeError(f"Hiç template bulunamadı: {self.templates_root}")
 
-        print(f"[INFO] Toplam template sayısı: {total_templates}")
+        print(f"[INFO] Toplam efektif template sayısı (rotated dahil): {total_templates}")
         return templates
 
     # -----------------------------
-    # Template Matching (+ hafif HSV check)
+    # Template Matching (downscale frame üzerinde)
     # -----------------------------
     def _detect_in_frame(self, frame_bgr, frame_gray):
         """
@@ -94,56 +134,76 @@ class CSignDetector:
         Dönüş:
             None  -> tespit yok
             dict  -> { 'direction', 'score', 'top_left', 'bottom_right', 'center' }
+            (Koordinatlar ORİJİNAL frame boyutlarına göre döner.)
         """
-
-        # HSV hesapla (ileride istersen daraltıp gerçek renk filtresi yapabilirsin)
-        hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
-        mask = cv2.inRange(hsv, self.hsv_lower, self.hsv_upper)
+        # Frame'i downscale et
+        if self.scale_factor != 1.0:
+            small_gray = cv2.resize(
+                frame_gray,
+                None,
+                fx=self.scale_factor,
+                fy=self.scale_factor,
+                interpolation=cv2.INTER_AREA,
+            )
+        else:
+            small_gray = frame_gray
 
         best_score = 0.0
-        best_detection = None
+        best_raw = None  # (direction, max_val, top_left_small, (w_small, h_small))
 
+        # Tüm (döndürülmüş + scale edilmiş) template'ler üzerinde tara
         for direction, tmpl_list in self.templates.items():
-            for template, (w, h) in tmpl_list:
-                # Eski, sağlam hali: full gray frame üzerinde matchTemplate
-                res = cv2.matchTemplate(frame_gray, template, cv2.TM_CCOEFF_NORMED)
+            for template, (w_t, h_t) in tmpl_list:
+                if (
+                    small_gray.shape[1] < w_t
+                    or small_gray.shape[0] < h_t
+                    or w_t <= 0
+                    or h_t <= 0
+                ):
+                    continue
+
+                res = cv2.matchTemplate(small_gray, template, cv2.TM_CCOEFF_NORMED)
                 min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(res)
 
                 if max_val > best_score:
                     best_score = max_val
-                    top_left = max_loc
-                    bottom_right = (top_left[0] + w, top_left[1] + h)
-                    center = (top_left[0] + w / 2.0, top_left[1] + h / 2.0)
-                    best_detection = {
-                        "direction": direction,
-                        "score": max_val,
-                        "top_left": top_left,
-                        "bottom_right": bottom_right,
-                        "center": center,
-                    }
+                    best_raw = (direction, max_val, max_loc, (w_t, h_t))
 
-        if best_detection is None or best_detection["score"] < self.match_threshold:
+        if best_raw is None or best_score < self.match_threshold:
             return None
 
-        # Hafif HSV filtresi: tespit edilen kutudaki mask oranına bak
-        tl = best_detection["top_left"]
-        br = best_detection["bottom_right"]
-        x1, y1 = tl
-        x2, y2 = br
-        x1 = max(x1, 0)
-        y1 = max(y1, 0)
-        x2 = min(x2, frame_gray.shape[1] - 1)
-        y2 = min(y2, frame_gray.shape[0] - 1)
+        direction, score, top_left_small, (w_s, h_s) = best_raw
 
-        roi = mask[y1:y2, x1:x2]
-        area = roi.size if roi.size > 0 else 1
-        coverage = cv2.countNonZero(roi) / float(area)
+        # Küçük frame koordinatlarını orijinale geri ölçekle
+        if self.scale_factor != 1.0:
+            sx = 1.0 / self.scale_factor
+            sy = 1.0 / self.scale_factor
+        else:
+            sx = sy = 1.0
 
-        # coverage threshold'ünü çok düşük tutuyorum ki gerçek tespitler kaçmasın
-        if coverage < 0.01:
-            return None
+        x1 = int(top_left_small[0] * sx)
+        y1 = int(top_left_small[1] * sy)
+        x2 = int((top_left_small[0] + w_s) * sx)
+        y2 = int((top_left_small[1] + h_s) * sy)
 
-        return best_detection
+        # Bounds içinde tut
+        h_frame, w_frame = frame_gray.shape
+        x1 = max(0, min(x1, w_frame - 1))
+        x2 = max(0, min(x2, w_frame - 1))
+        y1 = max(0, min(y1, h_frame - 1))
+        y2 = max(0, min(y2, h_frame - 1))
+
+        cx = (x1 + x2) / 2.0
+        cy = (y1 + y2) / 2.0
+
+        detection = {
+            "direction": direction,
+            "score": score,
+            "top_left": (x1, y1),
+            "bottom_right": (x2, y2),
+            "center": (cx, cy),
+        }
+        return detection
 
     # -----------------------------
     # Track yönetimi
@@ -206,6 +266,7 @@ class CSignDetector:
         print(f"[INFO] Toplam frame: {total_frames}")
 
         frame_index = 0
+        start_time = time.time()
 
         while True:
             ret, frame = cap.read()
@@ -239,12 +300,11 @@ class CSignDetector:
                     # Hiç track yoksa -> yeni obje
                     self._start_new_track(detection, frame_index, frame.copy())
                 else:
-                    # Aktif track varsa: aynı obje mi?
+                    # Aktif track varsa: yön aynı ve aradaki frame aralığı makulse = aynı obje
                     last_frame = self.active_track["last_frame"]
                     last_direction = self.active_track["direction"]
                     frame_gap = frame_index - last_frame
 
-                    # Yön aynı ve aradaki frame aralığı makul ise aynı obje kabul et
                     if (
                         direction == last_direction
                         and frame_gap <= self.track_max_frame_gap
@@ -264,24 +324,38 @@ class CSignDetector:
                     self._finalize_active_track()
 
             # -------------------------
-            # Overlay: Frame ve yüzde
+            # Overlay: Frame, yüzde, geçen süre
             # -------------------------
+            elapsed = time.time() - start_time
             if total_frames > 0:
                 percent = (frame_index + 1) / total_frames * 100.0
-                info_text = f"Frame: {frame_index+1} / {total_frames} ({percent:4.1f}%)"
-                cv2.putText(
-                    frame,
-                    info_text,
-                    (10, 30),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.7,
-                    (0, 255, 255),
-                    2,
+            else:
+                percent = 0.0
+
+            info_text = (
+                f"Frame: {frame_index+1}/{total_frames} "
+                f"({percent:4.1f}%)  Time: {elapsed:5.1f}s"
+            )
+            cv2.putText(
+                frame,
+                info_text,
+                (10, 30),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.6,
+                (0, 255, 255),
+                2,
+            )
+
+            # Her 200 framede bir konsola da yaz
+            if frame_index % 200 == 0:
+                print(
+                    f"[PROGRESS] Frame {frame_index+1}/{total_frames} "
+                    f"({percent:4.1f}%)  Elapsed: {elapsed:5.1f}s"
                 )
 
             # Normal akışta göster
             cv2.imshow("Video", frame)
-            key = cv2.waitKey(1) & 0xFF  # daha akıcı oynatma için 1 ms
+            key = cv2.waitKey(1) & 0xFF  # hızlı oynatma için 1 ms
 
             if key == 27:  # ESC
                 print("[INFO] ESC basıldı, program sonlandırılıyor.")
@@ -295,6 +369,9 @@ class CSignDetector:
 
         # Son track açık kalmışsa kapat
         self._finalize_active_track()
+
+        total_elapsed = time.time() - start_time
+        print(f"\n[INFO] Toplam süre: {total_elapsed:.2f} saniye")
 
         print("\n[SUMMARY] Tespit edilen objeler:")
         for i, t in enumerate(self.finished_tracks, start=1):
