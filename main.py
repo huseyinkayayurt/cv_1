@@ -37,7 +37,7 @@ def main():
         templates_root=args.templates_root,
         match_threshold=args.threshold,
         same_object_max_distance=args.pause_distance,
-        pause_key=" "   # space tuşu, istersen burayı başka char yapabilirsin
+        pause_key=" "  # space tuşu, istersen burayı başka char yapabilirsin
     )
 
     detector.process_video(args.video)
