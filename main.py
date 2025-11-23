@@ -12,7 +12,7 @@ def parse_args():
     )
     parser.add_argument(
         "--templates-root",
-        default="templates/c_signs",
+        default="templates/c_sign",
         help="C işareti template kök klasörü (varsayılan: templates/c_sign)"
     )
     parser.add_argument(
