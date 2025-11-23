@@ -26,6 +26,13 @@ class CSignDetector:
         "down": "Asagi",
     }
 
+    PRINT_LABELS = {
+        "Sag": "Sağ",
+        "Sol": "Sol",
+        "Yukari": "Yukarı",
+        "Asagi": "Aşağı",
+    }
+
     def __init__(
             self,
             templates_root: str,
@@ -220,9 +227,10 @@ class CSignDetector:
         self._add_known_object(center)
 
         # Ödevde istenen tek log
+        print_dir = self.PRINT_LABELS.get(direction, direction)
         print(
             f"[DETECTION] Frame={frame_index:5d} | "
-            f"Yön={direction:6s} | "
+            f"Yön={print_dir:6s} | "
             f"Score={score:.3f} | "
             f"Merkez=({center[0]:.1f}, {center[1]:.1f})"
         )
