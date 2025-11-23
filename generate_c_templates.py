@@ -33,7 +33,7 @@ def main():
     c_patch = img[y:y + h, x:x + w]
     c_patch = cv2.rotate(c_patch, cv2.ROTATE_180)
 
-    templates_root = project_root / "templates" / "c_signs"
+    templates_root = project_root / "templates" / "c_sign"
     right_dir = templates_root / "right"
     left_dir = templates_root / "left"
     up_dir = templates_root / "up"
