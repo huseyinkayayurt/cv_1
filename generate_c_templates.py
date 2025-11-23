@@ -9,8 +9,8 @@ def ensure_dir(path: Path):
 
 def main():
     project_root = Path(__file__).resolve().parent
-    frame_path = project_root / "frames_backup/frame_010860.jpg"
-    template_index = 5
+    frame_path = project_root / "frames_backup/frame_003880.jpg"
+    template_index = 3
 
     if not frame_path.exists():
         raise FileNotFoundError(f"Frame bulunamadı: {frame_path}")
