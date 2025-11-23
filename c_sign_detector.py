@@ -23,7 +23,7 @@ class CSignDetector:
         "right": "Sag",
         "left": "Sol",
         "up": "Yukari",
-        "down": "Asagı",
+        "down": "Asagi",
     }
 
     def __init__(
