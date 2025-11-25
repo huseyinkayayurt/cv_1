@@ -8,18 +8,21 @@ HOG_CELLS_PER_BLOCK = (2, 2)
 HOG_ORIENTATIONS = 9
 IMG_SIZE = (64, 64)
 
-DEFAULT_SIMILARITY_THRESHOLD = 0.66
+DEFAULT_SIMILARITY_THRESHOLD = 0.65
 
 CUSTOM_THRESHOLDS = {
     "poison": 0.65,
     "inhalation-hazard": 0.65,
     "radioactive": 0.70,
-    "corrosive": 0.60,
+    "corrosive": 0.70,
     "organic-peroxide": 0.7,
     "oxidizer": 0.60,
-    "spontaneously-combustible": 0.65,
+    "spontaneously-combustible": 0.70,
     "flammable-gas": 0.65,
-    "flammable-solid": 0.65
+    "flammable-solid": 0.65,
+    "explosives": 0.60,
+    "blasting-agents": 0.60,
+    "dangerous-when-wet": 0.60
 }
 
 TRACKING_DISTANCE_LIMIT = 250
@@ -100,49 +103,78 @@ class HazmatDetector:
 
             self.templates_hog[name] = features
 
-    def get_dominant_color_category(self, roi):
+    def get_dominant_colors(self, roi):
         roi_small = cv2.resize(roi, (32, 32))
         hsv = cv2.cvtColor(roi_small, cv2.COLOR_BGR2HSV)
 
         h, w = hsv.shape[:2]
         center_hsv = hsv[h // 4:3 * h // 4, w // 4:3 * w // 4]
 
-        mean_h = np.mean(center_hsv[:, :, 0])
-        mean_s = np.mean(center_hsv[:, :, 1])
-        mean_v = np.mean(center_hsv[:, :, 2])
+        pixels = center_hsv.reshape(-1, 3)
 
-        if mean_s < 50 and mean_v > 130:
-            return "white"
+        detected_colors = set()
 
-        if mean_v < 60:
-            return "black"
+        color_counts = {
+            "red": 0, "orange": 0, "yellow": 0, "green": 0, "blue": 0, "white": 0, "black": 0
+        }
+        total_pixels = len(pixels)
 
-        if (mean_h >= 0 and mean_h <= 10) or (mean_h >= 160 and mean_h <= 180):
-            return "red"
-        elif 11 <= mean_h <= 25:
-            return "orange"
-        elif 26 <= mean_h <= 35:
-            return "yellow"
-        elif 36 <= mean_h <= 85:
-            return "green"
-        elif 86 <= mean_h <= 130:
-            return "blue"
+        for p in pixels:
+            hue, sat, val = p
 
-        return "unknown"
+            if val < 60:
+                color_counts["black"] += 1
+                continue
+
+            if sat < 50 and val > 130:
+                color_counts["white"] += 1
+                continue
+
+            if sat >= 40:
+                if (hue >= 0 and hue <= 10) or (hue >= 160 and hue <= 180):
+                    color_counts["red"] += 1
+                elif 11 <= hue <= 25:
+                    color_counts["orange"] += 1
+                elif 26 <= hue <= 35:
+                    color_counts["yellow"] += 1
+                elif 36 <= hue <= 85:
+                    color_counts["green"] += 1
+                elif 86 <= hue <= 130:
+                    color_counts["blue"] += 1
+
+        threshold_count = total_pixels * 0.15
+
+        for color, count in color_counts.items():
+            if count > threshold_count:
+                detected_colors.add(color)
+
+        if not detected_colors and np.mean(pixels[:, 2]) > 150:
+            detected_colors.add("white")
+
+        return detected_colors
 
     def verify_color(self, roi, hazmat_name):
-        detected_color = self.get_dominant_color_category(roi)
-        expected_colors = HAZMAT_COLORS.get(hazmat_name, [])
+        detected_colors = self.get_dominant_colors(roi)
+        expected_colors = set(HAZMAT_COLORS.get(hazmat_name, []))
 
-        if detected_color in expected_colors:
+        if not expected_colors:
             return True
 
-        if "yellow" in expected_colors and (detected_color == "white" or detected_color == "orange"):
+        intersection = detected_colors.intersection(expected_colors)
+
+        if intersection:
+            if "orange" in expected_colors and "yellow" in detected_colors and "orange" not in detected_colors:
+                return True
+
+            if "yellow" in expected_colors and "orange" in detected_colors and "yellow" not in detected_colors:
+                return True
+
             return True
 
-        if "white" in expected_colors and detected_color == "yellow":
-            if hazmat_name == "poison" or hazmat_name == "inhalation-hazard":
-                return False
+        if "white" in expected_colors and ("yellow" in detected_colors or "orange" in detected_colors):
+            return True
+
+        if "yellow" in expected_colors and "white" in detected_colors:
             return True
 
         return False
