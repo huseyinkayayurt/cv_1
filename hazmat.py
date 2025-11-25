@@ -1,34 +1,25 @@
 import cv2
 import numpy as np
 import os
-import sys
 from skimage.feature import hog
 
-# --- AYARLAR ---
 HOG_PIXELS_PER_CELL = (8, 8)
 HOG_CELLS_PER_BLOCK = (2, 2)
 HOG_ORIENTATIONS = 9
 IMG_SIZE = (64, 64)
 
-# GENEL EŞİK (Varsayılan)
-# Renkli ve belirgin işaretler için bu değer kullanılır.
-DEFAULT_SIMILARITY_THRESHOLD = 0.65
+DEFAULT_SIMILARITY_THRESHOLD = 0.66
 
-# --- KRİTİK AYAR: SINIF BAZLI EŞİK DEĞERLERİ ---
-# Beyaz arka planlı veya karışmaya müsait işaretler için eşiği yükseltiyoruz.
-# Böylece duvardaki beyaz lekeyi "Poison" sanmaz.
 CUSTOM_THRESHOLDS = {
-    "poison": 0.65,  # Beyaz olduğu için sıkı kontrol
-    "inhalation-hazard": 0.65,  # Beyaz
-    "radioactive": 0.65,  # Sarı-Beyaz, karışabilir
-    "corrosive": 0.65,  # Beyaz-Siyah
-    "organic-peroxide": 0.60,  # Sarı/Kırmızı ama karışık
-    "oxidizer": 0.60,  # Sarı
+    "poison": 0.65,
+    "inhalation-hazard": 0.65,
+    "radioactive": 0.70,
+    "corrosive": 0.60,
+    "organic-peroxide": 0.7,
+    "oxidizer": 0.60,
     "spontaneously-combustible": 0.65,
     "flammable-gas": 0.65,
     "flammable-solid": 0.65
-
-    # Diğerleri (Explosives, Flammable Gas vb.) 0.50 ile devam eder.
 }
 
 TRACKING_DISTANCE_LIMIT = 250
@@ -41,7 +32,6 @@ HAZMAT_NAMES = [
     'inhalation-hazard', 'poison', 'radioactive', 'corrosive'
 ]
 
-# --- RENK TANIMLAMALARI ---
 HAZMAT_COLORS = {
     "explosives": ["orange"],
     "blasting-agents": ["orange"],
@@ -86,15 +76,12 @@ class HazmatDetector:
         return features
 
     def load_templates(self, template_dir):
-        print(f"[BILGI] Şablonlar yükleniyor: {template_dir}")
         if not os.path.exists(template_dir):
-            print("HATA: Klasör bulunamadı.")
+            print("Error: Template directory cannot be found.")
             return
 
         for name in HAZMAT_NAMES:
             path = os.path.join(template_dir, f"{name}.png")
-            if not os.path.exists(path):
-                path = os.path.join(template_dir, f"{name}.jpg")
             if not os.path.exists(path): continue
 
             img = cv2.imread(path, cv2.IMREAD_UNCHANGED)
@@ -112,17 +99,11 @@ class HazmatDetector:
             if norm != 0: features /= norm
 
             self.templates_hog[name] = features
-        print(f"[BILGI] {len(self.templates_hog)} şablon hazır.")
 
     def get_dominant_color_category(self, roi):
-        """
-        Geliştirilmiş Renk Tespiti.
-        Beyaz rengi daha hassas algılamak için Value ve Saturation kontrolü.
-        """
         roi_small = cv2.resize(roi, (32, 32))
         hsv = cv2.cvtColor(roi_small, cv2.COLOR_BGR2HSV)
 
-        # Merkeze odaklan
         h, w = hsv.shape[:2]
         center_hsv = hsv[h // 4:3 * h // 4, w // 4:3 * w // 4]
 
@@ -130,16 +111,12 @@ class HazmatDetector:
         mean_s = np.mean(center_hsv[:, :, 1])
         mean_v = np.mean(center_hsv[:, :, 2])
 
-        # Beyaz tespiti (Düşük Doygunluk, Yüksek Parlaklık)
-        # Saturation < 50 VE Value > 130 (Gri duvarları elemek için Value yüksek olmalı)
         if mean_s < 50 and mean_v > 130:
             return "white"
 
-        # Siyah tespiti (Çok düşük parlaklık)
         if mean_v < 60:
             return "black"
 
-        # Renkler
         if (mean_h >= 0 and mean_h <= 10) or (mean_h >= 160 and mean_h <= 180):
             return "red"
         elif 11 <= mean_h <= 25:
@@ -157,19 +134,13 @@ class HazmatDetector:
         detected_color = self.get_dominant_color_category(roi)
         expected_colors = HAZMAT_COLORS.get(hazmat_name, [])
 
-        # Tam eşleşme
         if detected_color in expected_colors:
             return True
 
-        # Özel Durum: Sarı işaretler bazen beyaz veya turuncu algılanabilir (ışık yüzünden)
         if "yellow" in expected_colors and (detected_color == "white" or detected_color == "orange"):
             return True
 
-        # Özel Durum: Beyaz işaretler bazen çok parlaksa sarımsı çıkabilir
         if "white" in expected_colors and detected_color == "yellow":
-            # Ama eğer "Poison" (Beyaz) ise ve renk bariz Sarı ise reddetmeliyiz.
-            # Burada threshold yüksek olduğu için riske girmeyip reddedelim.
-            # Sadece 'radioactive' hem beyaz hem sarı içerir, o geçer.
             if hazmat_name == "poison" or hazmat_name == "inhalation-hazard":
                 return False
             return True
@@ -221,7 +192,6 @@ class HazmatDetector:
                     if x < 5 or y < 5 or (x + w) > frame_w - 5 or (y + h) > frame_h - 5: continue
                     roi = frame[y:y + h, x:x + w]
 
-                    # Duvar elemesi (Düz renk kontrolü)
                     if np.std(cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)) < 35: continue
 
                     candidates.append((x, y, w, h, roi))
@@ -239,10 +209,7 @@ class HazmatDetector:
 
                 matches = []
                 for name, template_hog in self.templates_hog.items():
-                    # 1. Her sınıf için kendi eşik değerini kullan
                     threshold = CUSTOM_THRESHOLDS.get(name, DEFAULT_SIMILARITY_THRESHOLD)
-                    threshold = DEFAULT_SIMILARITY_THRESHOLD
-
                     score = np.dot(roi_hog, template_hog)
 
                     if score > threshold:
@@ -254,7 +221,6 @@ class HazmatDetector:
                 final_score = 0
 
                 for score, name in matches[:3]:
-                    # 2. Renk Doğrulaması
                     if self.verify_color(roi, name):
                         final_name = name
                         final_score = score
@@ -274,7 +240,6 @@ class HazmatDetector:
             except Exception:
                 pass
 
-        # Takip Mantığı
         for obj in current_frame_objects:
             is_new_object = True
             for known in self.known_objects:
@@ -294,78 +259,9 @@ class HazmatDetector:
                     'center': obj['center'],
                     'last_seen': frame_count
                 })
-                print(f">>> YENİ TESPİT: {obj['name']} | Skor: {obj['score']:.2f} | Frame: {frame_count}")
+                print(f"[H] Frame={frame_count:5d} | "
+                      f"Name={obj['name']} | "
+                      f"Score={obj['score']:.2f}")
 
         self.known_objects = [obj for obj in self.known_objects if (frame_count - obj['last_seen']) < MEMORY_TIMEOUT]
         return detections, should_pause, dilated_edges
-
-
-def main(video_path, template_dir):
-    if not os.path.exists(video_path):
-        print(f"HATA: Video yok -> {video_path}")
-        return
-    if not os.path.exists(template_dir):
-        print(f"HATA: Template yok -> {template_dir}")
-        return
-
-    detector = HazmatDetector(template_dir)
-    cap = cv2.VideoCapture(video_path)
-
-    if not cap.isOpened():
-        print("Video açılamadı.")
-        return
-
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    fps = cap.get(cv2.CAP_PROP_FPS)
-    if fps == 0: fps = 30
-
-    frame_counter = 0
-    cv2.namedWindow("Hazmat Detection", cv2.WINDOW_NORMAL)
-    cv2.resizeWindow("Hazmat Detection", 800, 600)
-
-    print(f"\n--- BAŞLIYOR ---")
-
-    while True:
-        ret, frame = cap.read()
-        if not ret: break
-        frame_counter += 1
-
-        detections, should_pause, _ = detector.detect_in_frame(frame, frame_counter)
-
-        current_time_msec = cap.get(cv2.CAP_PROP_POS_MSEC)
-        elapsed_seconds = current_time_msec / 1000.0
-        mins = int(elapsed_seconds // 60)
-        secs = int(elapsed_seconds % 60)
-        percentage = (frame_counter / total_frames) * 100
-
-        for det in detections:
-            x, y, w, h = det["box"]
-            label = f"{det['name']} ({det['score']:.2f})"
-            cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
-            (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
-            cv2.rectangle(frame, (x, y - 25), (x + tw, y), (0, 255, 0), -1)
-            cv2.putText(frame, label, (x, y - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
-
-        cv2.rectangle(frame, (0, 0), (frame.shape[1], 40), (0, 0, 0), -1)
-        info_text = f"Frame: {frame_counter}/{total_frames} | %{percentage:.1f} | {mins:02d}:{secs:02d}"
-        cv2.putText(frame, info_text, (20, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-
-        cv2.imshow("Hazmat Detection", frame)
-        key = cv2.waitKey(1) & 0xFF
-        if key == ord('q'): break
-
-        if should_pause:
-            overlay = frame.copy()
-            cv2.addWeighted(overlay, 0.6, frame, 0.4, 0, frame)
-
-            cv2.imshow("Hazmat Detection", frame)
-            cv2.waitKey(0)
-
-    cap.release()
-    cv2.destroyAllWindows()
-
-
-if __name__ == "__main__":
-    v_path = sys.argv[1] if len(sys.argv) > 1 else VIDEO_FILE
-    t_path = sys.argv[2] if len(sys.argv) > 2 else TEMPLATE_FOLDER
-    main(v_path, t_path)
